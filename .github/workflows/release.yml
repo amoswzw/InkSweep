@@ -1,0 +1,193 @@
+name: Release
+
+# Releases happen on demand: "Run workflow" bumps the latest v* tag (patch, minor or major),
+# and pushing a v* tag releases exactly that version. Pushes to main only run CI (ci.yml).
+# The build number is the run number, which only grows.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version part to increase"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    # Its secrets live only in this environment, which waits for the owner's approval.
+    environment: release
+    env:
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+    steps:
+      - name: Check signing secrets
+        id: secrets
+        shell: bash
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::notice::Release skipped: missing secrets ${missing[*]}. InkSweep only ships signed and notarized builds."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          fetch-depth: 0   # tags, to find the last version
+
+      - name: Next version
+        id: version
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = tag ]; then
+            NEXT="${GITHUB_REF_NAME#v}"
+            LAST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -n 1 || true)"
+          else
+            LAST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+            BUMP="${{ inputs.bump || 'patch' }}"
+            if [ -z "$LAST" ]; then
+              NEXT="0.1.0"                     # first release
+            else
+              IFS=. read -r MA MI PA <<< "${LAST#v}"
+              case "$BUMP" in
+                major) NEXT="$((MA + 1)).0.0" ;;
+                minor) NEXT="$MA.$((MI + 1)).0" ;;
+                *)     NEXT="$MA.$MI.$((PA + 1))" ;;
+              esac
+            fi
+          fi
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+          echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$NEXT (build ${{ github.run_number }}) after ${LAST:-nothing}"
+
+      - name: Test
+        if: steps.secrets.outputs.ready == 'true'
+        run: swift test
+
+      - name: Import Developer ID certificate
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application" \
+            || { echo "No Developer ID Application identity in the certificate." >&2; exit 1; }
+
+      - name: Build and sign
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}" \
+          BUILD="${{ steps.version.outputs.build }}" \
+          RELEASE=1 ./Scripts/make-app.sh
+          codesign --verify --deep --strict --verbose=2 build/InkSweep.app
+
+      - name: Notarize and staple
+        id: package
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="build/InkSweep-${{ steps.version.outputs.version }}.zip"
+          ditto -c -k --keepParent build/InkSweep.app "$ZIP"
+          xcrun notarytool submit "$ZIP" --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          # Stapling fetches the ticket from Apple's CDN, which sometimes drops the connection.
+          for attempt in 1 2 3; do
+            xcrun stapler staple build/InkSweep.app && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 15
+          done
+          rm "$ZIP"
+          ditto -c -k --keepParent build/InkSweep.app "$ZIP"   # re-zip with the ticket
+          spctl --assess --type execute --verbose build/InkSweep.app
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 "$ZIP.sha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          NOTES="$(mktemp)"
+          cat > "$NOTES" <<NOTES
+          InkSweep ${{ steps.version.outputs.version }} (build ${{ steps.version.outputs.build }})
+
+          Signed with Developer ID and notarized by Apple.
+
+          Install with Homebrew:
+
+              brew install --cask amoswzw/tap/inksweep
+
+          Or download the zip, unzip it, and move InkSweep.app to Applications.
+          SHA-256 is attached as a separate .sha256 file.
+          NOTES
+          {
+            echo
+            echo "Changes:"
+            echo
+            LAST="${{ steps.version.outputs.last }}"
+            git log --no-merges --pretty='- %s' ${LAST:+"$LAST..HEAD"}
+          } >> "$NOTES"
+          gh release create "$TAG" "${{ steps.package.outputs.zip }}" "${{ steps.package.outputs.zip }}.sha256" \
+            --target "$GITHUB_SHA" --title "InkSweep $TAG" --notes-file "$NOTES"
+
+      - name: Update Homebrew tap
+        if: steps.secrets.outputs.ready == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: amoswzw/homebrew-tap
+          CASK_PATH: Casks/inksweep.rb
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.package.outputs.sha256 }}"
+          sed -E -e "s/^(  version )\"[^\"]+\"/\1\"${VERSION}\"/" \
+                 -e "s/^(  sha256 )\"[^\"]+\"/\1\"${SHA256}\"/" \
+                 packaging/homebrew/inksweep.rb > "$RUNNER_TEMP/inksweep.rb"
+          # Create the cask the first time, update it after (the API needs the old blob sha).
+          BLOB_SHA="$(gh api "repos/${TAP_REPO}/contents/${CASK_PATH}" --jq .sha 2>/dev/null || true)"
+          ARGS=(-f message="inksweep ${VERSION}" -f content="$(base64 < "$RUNNER_TEMP/inksweep.rb" | tr -d '\n')")
+          [ -n "$BLOB_SHA" ] && ARGS+=(-f sha="$BLOB_SHA")
+          gh api --method PUT "repos/${TAP_REPO}/contents/${CASK_PATH}" "${ARGS[@]}" > /dev/null
+          echo "Tap updated to inksweep ${VERSION}"
