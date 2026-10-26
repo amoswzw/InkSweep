@@ -41,7 +41,7 @@ Eight tools, one ink world:
 <a href="docs/screenshots/6-dark.png"><img src="docs/screenshots/6-dark.png" width="49%" alt="Smart Clean in dark mode"></a>
 </p>
 
-There is also a menu bar companion (a brushed broom, 掃) with the state of the
+There is also a menu bar companion (the app icon's sumi sweep) with the state of the
 last scan, Clean-to-Trash, updates and disk — <a href="docs/screenshots/7-menu-bar.png">screenshot</a>.
 
 ## Install

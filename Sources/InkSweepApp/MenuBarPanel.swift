@@ -129,24 +129,26 @@ struct MenuBarPanel: View {
         model.showMainWindow(tool)
     }
 
-    /// A brushed broom (掃, "sweep") as a template image, so the menu bar
-    /// tints it like every other status item. The ensō is InkBar's mark;
-    /// this one has to be told apart from it at a glance.
+    /// The app icon's sumi sweep and splatter dots as a template image, so
+    /// the menu bar tints it like every other status item. Geometry is in the
+    /// app icon's 1024 y-up space (Scripts/icongen.swift).
     static let icon: NSImage = {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
             guard let cg = NSGraphicsContext.current?.cgContext else { return false }
-            let ink = NSColor.black.cgColor
-            // Handle: from the top right down to the binding.
-            InkBrush.stroke(cg, [CGPoint(x: 15.2, y: 1.6), CGPoint(x: 11.4, y: 6.4), CGPoint(x: 8.6, y: 9.6)],
-                            width: 1.7, color: ink, paper: nil, seed: 2, texture: 0.4)
-            // Bristles: three strokes fanning from the binding.
-            for (i, end) in [CGPoint(x: 1.4, y: 11.6), CGPoint(x: 2.9, y: 14.6), CGPoint(x: 5.8, y: 16.8)].enumerated() {
-                InkBrush.stroke(cg, [CGPoint(x: 9.2, y: 9.0), CGPoint(x: (9.2 + end.x) / 2, y: (9.0 + end.y) / 2 + 0.4), end],
-                                width: 1.9, color: ink, paper: nil, seed: 11 + i, texture: 0.5)
-            }
-            // The swept stroke on the ground.
-            InkBrush.stroke(cg, [CGPoint(x: 9.5, y: 16.6), CGPoint(x: 13.0, y: 16.2), CGPoint(x: 16.6, y: 15.2)],
-                            width: 1.4, color: ink, paper: nil, seed: 21, texture: 0.4)
+            cg.scaleBy(x: 18 / 1024, y: 18 / 1024)
+            cg.translateBy(x: -100, y: -200)
+            cg.scaleBy(x: 1.08, y: 1.08)
+            cg.setFillColor(NSColor.black.cgColor)
+            cg.move(to: CGPoint(x: 110, y: 470))
+            cg.addCurve(to: CGPoint(x: 900, y: 660), control1: CGPoint(x: 340, y: 780), control2: CGPoint(x: 660, y: 700))
+            cg.addCurve(to: CGPoint(x: 790, y: 530), control1: CGPoint(x: 970, y: 700), control2: CGPoint(x: 900, y: 580))
+            cg.addCurve(to: CGPoint(x: 150, y: 430), control1: CGPoint(x: 620, y: 480), control2: CGPoint(x: 330, y: 420))
+            cg.closePath()
+            cg.fillPath()
+            cg.scaleBy(x: 1 / 1.08, y: 1 / 1.08)
+            cg.translateBy(x: 100, y: 200)
+            cg.fillEllipse(in: CGRect(x: 190, y: 150, width: 90, height: 72))
+            cg.fillEllipse(in: CGRect(x: 320, y: 90, width: 50, height: 40))
             return true
         }
         image.isTemplate = true

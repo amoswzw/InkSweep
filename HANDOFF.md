@@ -40,7 +40,7 @@ for what exists / is locked / is next. Standing rules underneath it:
   MenuBarExtra — MenuBarExtra ignores the accessibility press InkBar uses
   to open hidden items. When the button is off-screen (InkBar presses
   non-notarized apps in place, concealed) the panel floats under the
-  pointer instead of a popover. Icon: brushed broom (掃), because the ensō
+  pointer instead of a popover. Icon: the app icon's sumi sweep stroke, because the ensō
   is InkBar's mark. `MenuBarPanel.swift` — ink panel
   (state, Clean-to-Trash, updates, last clean, disk, Open InkSweep / Check
   now). Screenshot it by clicking the menu bar icon by hand (status-item clicks
